@@ -75,7 +75,7 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   }
   const priceData = await priceRes.json() as { solana?: { usd: number } };
   const solPrice = priceData.solana?.usd;
-  if (!solPrice) throw new Error('Failed to fetch SOL price from CoinGecko');
+  if (typeof solPrice !== 'number') throw new Error('Failed to fetch SOL price from CoinGecko');
 
   // Get SPL token accounts
   const tokenRes = await fetch(HELIUS_RPC, {
@@ -124,18 +124,22 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   const tokens: TokenHolding[] = [];
 
   // Only process known tokens (registry-matched) to keep prompt short
-  const mintsToPrice: string[] = [];
-  const rawHoldings: Array<{ mint: string; amount: number }> = [];
+  const holdingsByMint = new Map<string, number>();
 
   for (const acct of accounts) {
     const info = acct.account.data.parsed.info;
     const amount = info.tokenAmount.uiAmount ?? 0;
     if (amount > 0 && TOKEN_REGISTRY[info.mint]) {
-      rawHoldings.push({ mint: info.mint, amount });
-      const known = TOKEN_REGISTRY[info.mint];
-      if (known.coingeckoId) mintsToPrice.push(known.coingeckoId);
+      holdingsByMint.set(info.mint, (holdingsByMint.get(info.mint) ?? 0) + amount);
     }
   }
+
+  // Deduplicated price IDs
+  const mintsToPrice = [...new Set(
+    [...holdingsByMint.keys()]
+      .map(mint => TOKEN_REGISTRY[mint].coingeckoId)
+      .filter((id): id is string => !!id)
+  )];
 
   // Batch price fetch from CoinGecko
   let prices: Record<string, { usd: number }> = {};
@@ -151,7 +155,7 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     }
   }
 
-  for (const { mint, amount } of rawHoldings) {
+  for (const [mint, amount] of holdingsByMint) {
     const known = TOKEN_REGISTRY[mint];
     const symbol = known.symbol;
     const cgId = known.coingeckoId;
