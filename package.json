@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@solana/web3.js": "^1.98.4",
     "@solrouter/sdk": "^1.0.1",
     "dotenv": "^17.4.0"
   },

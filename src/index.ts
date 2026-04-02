@@ -55,6 +55,9 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
+  if (!balanceRes.ok) {
+    throw new Error(`Solana RPC HTTP error (getBalance): ${balanceRes.status}`);
+  }
   const balanceData = await balanceRes.json() as Record<string, unknown>;
   if (balanceData.error) {
     throw new Error(`RPC error (getBalance): ${JSON.stringify(balanceData.error)}`);
@@ -90,6 +93,9 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
+  if (!tokenRes.ok) {
+    throw new Error(`Solana RPC HTTP error (getTokenAccounts): ${tokenRes.status}`);
+  }
   const tokenData = await tokenRes.json() as Record<string, unknown>;
   if (tokenData.error) {
     throw new Error(`RPC error (getTokenAccounts): ${JSON.stringify(tokenData.error)}`);
@@ -153,11 +159,12 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     tokens.push({ mint, symbol, amount, usdValue: amount * usdPrice });
   }
 
-  // Top 10 by USD value — keeps AI prompt short
+  // Top 10 by USD value for AI prompt (keep short), but sum all for total
+  const totalTokenValue = tokens.reduce((sum, t) => sum + t.usdValue, 0);
   const topTokens = [...tokens].sort((a, b) => b.usdValue - a.usdValue).slice(0, 10);
 
   const solUsdValue = solBalance * solPrice;
-  const totalUsdValue = solUsdValue + topTokens.reduce((sum, t) => sum + t.usdValue, 0);
+  const totalUsdValue = solUsdValue + totalTokenValue;
 
   return { walletAddress, solBalance, solUsdValue, tokens: topTokens, totalUsdValue };
 }
