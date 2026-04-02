@@ -8,6 +8,7 @@
  */
 
 import { SolRouter } from '@solrouter/sdk';
+import { PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -211,9 +212,11 @@ async function main() {
       process.exit(1);
     }
 
-    // Validate Solana address (base58, 32-44 chars)
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
-      console.error('❌ Invalid Solana address format');
+    // Validate Solana address using web3.js PublicKey (base58 + checksum)
+    try {
+      new PublicKey(walletAddress);
+    } catch {
+      console.error('❌ Invalid Solana address');
       process.exit(1);
     }
 
