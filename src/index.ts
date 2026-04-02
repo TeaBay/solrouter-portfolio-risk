@@ -21,6 +21,7 @@ const client = new SolRouter({ apiKey: API_KEY });
 
 // ─── Helius RPC for on-chain data (free tier) ────────────────────────────────
 const HELIUS_RPC = 'https://api.mainnet-beta.solana.com';
+const FETCH_TIMEOUT = 15_000;
 
 interface TokenHolding {
   mint: string;
@@ -51,21 +52,26 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
       method: 'getBalance',
       params: [walletAddress],
     }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
-  const balanceData = await balanceRes.json() as { result: { value: number } };
-  const solBalance = (balanceData.result?.value ?? 0) / 1e9;
+  const balanceData = await balanceRes.json() as Record<string, unknown>;
+  if (balanceData.error) {
+    throw new Error(`RPC error (getBalance): ${JSON.stringify(balanceData.error)}`);
+  }
+  const solBalance = ((balanceData.result as { value: number })?.value ?? 0) / 1e9;
 
   // Get SOL price from CoinGecko (no key needed)
-  let solPrice = 150; // fallback
-  try {
-    const priceRes = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd'
-    );
-    const priceData = await priceRes.json() as { solana?: { usd: number } };
-    solPrice = priceData.solana?.usd ?? solPrice;
-  } catch {
-    console.warn('  ⚠️  CoinGecko unavailable, using fallback SOL price $150');
+  const priceRes = await fetch(
+    'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+    { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
+  );
+  if (!priceRes.ok) {
+    if (priceRes.status === 429) throw new Error('CoinGecko rate limit hit — wait before retrying');
+    throw new Error(`CoinGecko API error: HTTP ${priceRes.status}`);
   }
+  const priceData = await priceRes.json() as { solana?: { usd: number } };
+  const solPrice = priceData.solana?.usd;
+  if (!solPrice) throw new Error('Failed to fetch SOL price from CoinGecko');
 
   // Get SPL token accounts
   const tokenRes = await fetch(HELIUS_RPC, {
@@ -81,23 +87,20 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
         { encoding: 'jsonParsed' },
       ],
     }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
-  const tokenData = await tokenRes.json() as {
-    result: {
-      value: Array<{
-        account: {
-          data: {
-            parsed: {
-              info: {
-                mint: string;
-                tokenAmount: { uiAmount: number | null; decimals: number };
-              };
-            };
-          };
-        };
-      }>;
-    };
-  };
+  const tokenData = await tokenRes.json() as Record<string, unknown>;
+  if (tokenData.error) {
+    throw new Error(`RPC error (getTokenAccounts): ${JSON.stringify(tokenData.error)}`);
+  }
+  interface TokenAccount {
+    account: { data: { parsed: { info: { mint: string; tokenAmount: { uiAmount: number | null } } } } };
+  }
+  const accounts = ((tokenData.result as { value?: unknown[] })?.value ?? []) as TokenAccount[];
+
+  if (accounts.length > 500) {
+    console.warn(`  ⚠️  Wallet has ${accounts.length} token accounts — only scanning known tokens`);
+  }
 
   // Known token registry (common Solana tokens)
   const TOKEN_REGISTRY: Record<string, { symbol: string; coingeckoId?: string }> = {
@@ -112,7 +115,6 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   };
 
   const tokens: TokenHolding[] = [];
-  const accounts = tokenData.result?.value ?? [];
 
   // Only process known tokens (registry-matched) to keep prompt short
   const mintsToPrice: string[] = [];
@@ -131,13 +133,14 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   // Batch price fetch from CoinGecko
   let prices: Record<string, { usd: number }> = {};
   if (mintsToPrice.length > 0) {
-    try {
-      const cgRes = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${mintsToPrice.join(',')}&vs_currencies=usd`
-      );
+    const cgRes = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${mintsToPrice.join(',')}&vs_currencies=usd`,
+      { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
+    );
+    if (!cgRes.ok) {
+      console.warn(`  ⚠️  CoinGecko token price fetch failed (HTTP ${cgRes.status})`);
+    } else {
       prices = await cgRes.json() as Record<string, { usd: number }>;
-    } catch {
-      console.warn('  ⚠️  CoinGecko price fetch failed');
     }
   }
 
@@ -149,14 +152,13 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     tokens.push({ mint, symbol, amount, usdValue: amount * usdPrice });
   }
 
-  // Top 10 by USD value only — keeps AI prompt short
-  tokens.sort((a, b) => b.usdValue - a.usdValue);
-  tokens.splice(10);
+  // Top 10 by USD value — keeps AI prompt short
+  const topTokens = [...tokens].sort((a, b) => b.usdValue - a.usdValue).slice(0, 10);
 
   const solUsdValue = solBalance * solPrice;
-  const totalUsdValue = solUsdValue + tokens.reduce((sum, t) => sum + t.usdValue, 0);
+  const totalUsdValue = solUsdValue + topTokens.reduce((sum, t) => sum + t.usdValue, 0);
 
-  return { walletAddress, solBalance, solUsdValue, tokens, totalUsdValue };
+  return { walletAddress, solBalance, solUsdValue, tokens: topTokens, totalUsdValue };
 }
 
 // ─── Build context string for encrypted AI analysis ──────────────────────────
@@ -219,13 +221,19 @@ async function main() {
       // Step 1: Fetch on-chain data
       const portfolio = await fetchPortfolio(walletAddress);
 
-      // Step 2: Display raw portfolio (this part is local — no AI involved yet)
+      if (portfolio.totalUsdValue === 0) {
+        console.log('\n📊 This wallet has no holdings.');
+        return;
+      }
+
+      // Step 2: Display raw portfolio (local — no AI involved yet)
+      const context = buildPortfolioContext(portfolio);
       console.log('\n📊 Portfolio Overview');
       console.log('━'.repeat(50));
-      console.log(buildPortfolioContext(portfolio));
+      console.log(context);
 
       // Step 3: Encrypted AI analysis — wallet identity never sent to AI
-      const analysis = await analyzeWithEncryptedAI(buildPortfolioContext(portfolio));
+      const analysis = await analyzeWithEncryptedAI(context);
 
       console.log('\n🤖 AI Risk Analysis (Processed in TEE — encrypted end-to-end)');
       console.log('━'.repeat(50));

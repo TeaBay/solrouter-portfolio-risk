@@ -36,7 +36,7 @@ All without revealing the wallet identity or strategy to any server.
 ### Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/solrouter-portfolio-risk
+git clone https://github.com/TeaBay/solrouter-portfolio-risk
 cd solrouter-portfolio-risk
 npm install
 ```
