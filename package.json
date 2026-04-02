@@ -1,0 +1,22 @@
+{
+  "name": "solrouter-portfolio",
+  "version": "1.0.0",
+  "description": "Private Solana portfolio risk analyzer using SolRouter encrypted inference",
+  "main": "index.js",
+  "scripts": {
+    "analyze": "node --loader ts-node/esm src/index.ts analyze",
+    "build": "tsc",
+    "start": "node --loader ts-node/esm src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@solrouter/sdk": "^1.0.1",
+    "@types/node": "^25.5.0",
+    "dotenv": "^17.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.2"
+  },
+  "type": "module"
+}
