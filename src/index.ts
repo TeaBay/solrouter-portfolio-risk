@@ -103,7 +103,8 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   // Aggregate holdings by mint (wallets can have multiple accounts per token)
   const holdingsByMint = new Map<string, number>();
   for (const acct of accounts) {
-    const info = acct.account.data.parsed.info;
+    const info = acct?.account?.data?.parsed?.info;
+    if (!info?.mint || !info?.tokenAmount) continue;
     const amount = info.tokenAmount.uiAmount ?? 0;
     if (amount > 0 && TOKEN_REGISTRY[info.mint]) {
       holdingsByMint.set(info.mint, (holdingsByMint.get(info.mint) ?? 0) + amount);
