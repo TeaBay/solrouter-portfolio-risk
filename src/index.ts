@@ -20,8 +20,8 @@ if (!API_KEY) {
 
 const client = new SolRouter({ apiKey: API_KEY });
 
-// ─── Helius RPC for on-chain data (free tier) ────────────────────────────────
-const HELIUS_RPC = 'https://api.mainnet-beta.solana.com';
+// ─── Solana RPC ──────────────────────────────────────────────────────────────
+const SOLANA_RPC = 'https://api.mainnet-beta.solana.com';
 const FETCH_TIMEOUT = 15_000;
 
 interface TokenHolding {
@@ -39,29 +39,29 @@ interface PortfolioData {
   totalUsdValue: number;
 }
 
+interface TokenAccount {
+  account: { data: { parsed: { info: { mint: string; tokenAmount: { uiAmount: number | null } } } } };
+}
+
+// ─── Solana JSON-RPC helper ───────────────────────────────────────────────────
+async function rpcCall(method: string, params: unknown[]): Promise<Record<string, unknown>> {
+  const res = await fetch(SOLANA_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+  });
+  if (!res.ok) throw new Error(`Solana RPC HTTP error (${method}): ${res.status}`);
+  const data = await res.json() as Record<string, unknown>;
+  if (data.error) throw new Error(`RPC error (${method}): ${JSON.stringify(data.error)}`);
+  return data;
+}
+
 // ─── Fetch portfolio data from Solana RPC ────────────────────────────────────
 async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   console.log(`\n🔍 Fetching on-chain data for: ${walletAddress.slice(0, 8)}...${walletAddress.slice(-4)}`);
 
-  // Get SOL balance
-  const balanceRes = await fetch(HELIUS_RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getBalance',
-      params: [walletAddress],
-    }),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT),
-  });
-  if (!balanceRes.ok) {
-    throw new Error(`Solana RPC HTTP error (getBalance): ${balanceRes.status}`);
-  }
-  const balanceData = await balanceRes.json() as Record<string, unknown>;
-  if (balanceData.error) {
-    throw new Error(`RPC error (getBalance): ${JSON.stringify(balanceData.error)}`);
-  }
+  const balanceData = await rpcCall('getBalance', [walletAddress]);
   const solBalance = ((balanceData.result as { value: number })?.value ?? 0) / 1e9;
 
   // Get SOL price from CoinGecko (no key needed)
@@ -77,32 +77,11 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
   const solPrice = priceData.solana?.usd;
   if (typeof solPrice !== 'number') throw new Error('Failed to fetch SOL price from CoinGecko');
 
-  // Get SPL token accounts
-  const tokenRes = await fetch(HELIUS_RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'getTokenAccountsByOwner',
-      params: [
-        walletAddress,
-        { programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' },
-        { encoding: 'jsonParsed' },
-      ],
-    }),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT),
-  });
-  if (!tokenRes.ok) {
-    throw new Error(`Solana RPC HTTP error (getTokenAccounts): ${tokenRes.status}`);
-  }
-  const tokenData = await tokenRes.json() as Record<string, unknown>;
-  if (tokenData.error) {
-    throw new Error(`RPC error (getTokenAccounts): ${JSON.stringify(tokenData.error)}`);
-  }
-  interface TokenAccount {
-    account: { data: { parsed: { info: { mint: string; tokenAmount: { uiAmount: number | null } } } } };
-  }
+  const tokenData = await rpcCall('getTokenAccountsByOwner', [
+    walletAddress,
+    { programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' },
+    { encoding: 'jsonParsed' },
+  ]);
   const accounts = ((tokenData.result as { value?: unknown[] })?.value ?? []) as TokenAccount[];
 
   if (accounts.length > 500) {
@@ -121,11 +100,8 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3': { symbol: 'PYTH', coingeckoId: 'pyth-network' },
   };
 
-  const tokens: TokenHolding[] = [];
-
-  // Only process known tokens (registry-matched) to keep prompt short
+  // Aggregate holdings by mint (wallets can have multiple accounts per token)
   const holdingsByMint = new Map<string, number>();
-
   for (const acct of accounts) {
     const info = acct.account.data.parsed.info;
     const amount = info.tokenAmount.uiAmount ?? 0;
@@ -155,11 +131,11 @@ async function fetchPortfolio(walletAddress: string): Promise<PortfolioData> {
     }
   }
 
+  // Build token holdings with USD values
+  const tokens: TokenHolding[] = [];
   for (const [mint, amount] of holdingsByMint) {
-    const known = TOKEN_REGISTRY[mint];
-    const symbol = known.symbol;
-    const cgId = known.coingeckoId;
-    const usdPrice = cgId ? (prices[cgId]?.usd ?? 0) : 0;
+    const { symbol, coingeckoId } = TOKEN_REGISTRY[mint];
+    const usdPrice = coingeckoId ? (prices[coingeckoId]?.usd ?? 0) : 0;
     tokens.push({ mint, symbol, amount, usdValue: amount * usdPrice });
   }
 
